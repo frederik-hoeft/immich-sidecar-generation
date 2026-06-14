@@ -12,18 +12,6 @@ namespace MkSidecar;
 [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "Instance methods are required by ConsoleAppFramework.")]
 internal sealed partial class Commands
 {
-    private static readonly ImmutableArray<string> s_allowedPrefixes = ["IMG_", "VID_"];
-
-    private static AndCombinator ParseTree => field ??= new(
-        new ExtensionParser(".jpg", ".jpeg", ".png", ".mp4"),
-        new OrCombinator(
-            new TimestampFormatParser("yyyy-MM-dd_HH-mm-ss", stripTrailing: true, s_allowedPrefixes),
-            new TimestampFormatParser("yyyy-MM-dd HH-mm-ss", stripTrailing: true, s_allowedPrefixes),
-            new TimestampFormatParser("yyyyMMdd_HHmmss", stripTrailing: true, s_allowedPrefixes),
-            new TimestampFormatParser("yyyyMMdd-HHmmss", stripTrailing: true, s_allowedPrefixes),
-            new TimestampFormatParser("yyyy-MM-dd", stripTrailing: false, allowedPrefixes: s_allowedPrefixes)
-            ));
-
     /// <summary>
     /// Generates XMP sidecars with timezone-aware dates derived from strict media filenames.
     /// </summary>
@@ -32,26 +20,35 @@ internal sealed partial class Commands
     /// <param name="dryRun">Print what would be written without creating files.</param>
     /// <param name="overwrite">Overwrite existing .xmp sidecars.</param>
     /// <param name="verbose">-v|Enable verbose output.</param>
+    /// <param name="interactive">-i|Enable interactive timestamp parsing for filenames that don't match strict formats.</param>
+    /// <param name="allowedPrefixes">Additional allowed prefixes that may appear before timestamps in filenames, e.g. "IMG_", "VID_".</param>
     [Command("")]
-    public async Task<int> GenerateAsync([Argument] string root = ".", string tz = "Europe/Berlin", bool dryRun = false, bool overwrite = false, bool verbose = false, CancellationToken cancellationToken = default)
+    public async Task<int> GenerateAsync([Argument] string root = ".",
+        string tz = "Europe/Berlin",
+        bool dryRun = false,
+        bool overwrite = false,
+        bool verbose = false,
+        bool interactive = false,
+        string[]? allowedPrefixes = null,
+        CancellationToken cancellationToken = default)
     {
-        if (!Directory.Exists(root))
+        (int status, TimeZoneInfo? timeZone) = ValidateParameters(root, tz);
+        if (status != 0 || timeZone == null)
         {
-            await Console.Error.WriteLineAsync($"Directory does not exist: {root}");
-            return 2;
+            return status;
         }
+        ImmutableArray<string> prefixes = allowedPrefixes is [_, ..] ? [.. allowedPrefixes] : [];
 
-        TimeZoneInfo timeZone;
-        try
-        {
-            timeZone = TimeZoneInfo.FindSystemTimeZoneById(tz);
-        }
-        catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
-        {
-            await Console.Error.WriteLineAsync($"Timezone not found or invalid: {tz}");
-            await Console.Error.WriteLineAsync(ex.Message);
-            return 2;
-        }
+        AndCombinator parseTree = new(
+            new ExtensionParser(".jpg", ".jpeg", ".png", ".mp4"),
+            new OrCombinator(
+                new TimestampFormatParser("yyyy-MM-dd_HH-mm-ss", stripTrailing: true, prefixes),
+                new TimestampFormatParser("yyyy-MM-dd HH-mm-ss", stripTrailing: true, prefixes),
+                new TimestampFormatParser("yyyyMMdd_HHmmss", stripTrailing: true, prefixes),
+                new TimestampFormatParser("yyyyMMdd-HHmmss", stripTrailing: true, prefixes),
+                new TimestampFormatParser("yyyy-MM-dd", stripTrailing: false, allowedPrefixes: prefixes),
+                new InteractiveTimestampParser(enabled: interactive)
+                ));
 
         int scanned = 0;
         int matched = 0;
@@ -67,7 +64,7 @@ internal sealed partial class Commands
 
             scanned++;
             fragments.Clear();
-            if (!ParseTree.TryParse(new MetadataParserContext(fileInfo, timeZone), fragments))
+            if (!parseTree.TryParse(new MetadataParserContext(fileInfo, timeZone), fragments))
             {
                 skipped++;
                 if (verbose)
@@ -123,5 +120,26 @@ internal sealed partial class Commands
         Console.WriteLine($"Failed:      {failed}");
 
         return failed == 0 ? 0 : 1;
+    }
+
+    private static (int status, TimeZoneInfo? timeZoneInfo) ValidateParameters(string root, string tz)
+    {
+        if (!Directory.Exists(root))
+        {
+            Console.Error.WriteLine($"Directory does not exist: {root}");
+            return (status: 2, timeZoneInfo: null);
+        }
+        TimeZoneInfo timeZone;
+        try
+        {
+            timeZone = TimeZoneInfo.FindSystemTimeZoneById(tz);
+        }
+        catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
+        {
+            Console.Error.WriteLine($"Timezone not found or invalid: {tz}, Error: '{ex.Message}'");
+            return (status: 2, timeZoneInfo: null);
+        }
+
+        return (status: 0, timeZoneInfo: timeZone);
     }
 }
