@@ -14,9 +14,10 @@ internal sealed class TimestampFormatParser([StringSyntax(StringSyntaxAttribute.
     {
         foreach (StringSegment candidate in GenerateCandidates(context))
         {
-            if (DateTime.TryParseExact(candidate, format, CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime timestamp))
+            if (DateTime.TryParseExact(candidate, format, CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime timestamp)
+                && XmpTimestampFragment.TryCreate(context, timestamp, out XmpTimestampFragment? fragment))
             {
-                results.Add(new XmpTimestampFragment(context, timestamp));
+                results.Add(fragment);
                 return true;
             }
         }
@@ -26,21 +27,26 @@ internal sealed class TimestampFormatParser([StringSyntax(StringSyntaxAttribute.
     private IEnumerable<StringSegment> GenerateCandidates(MetadataParserContext context)
     {
         StringSegment name = context.File.NameOnly.ToString();
-        if (stripTrailing && name.Length > format.Length)
-        {
-            // strip off trailing characters, e.g. "2023-01-01 12-00-00 (1).jpg" -> "2023-01-01 12-00-00"
-            name = name[..format.Length];
-        }
-        yield return name;
+        yield return Normalize(name);
         if (!allowedPrefixes.IsDefaultOrEmpty)
         {
             foreach (string prefix in allowedPrefixes)
             {
-                if (name.AsSpan().StartsWith(prefix))
+                if (name.AsSpan().StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                 {
-                    yield return name[prefix.Length..];
+                    yield return Normalize(name[prefix.Length..]);
                 }
             }
         }
+    }
+
+    private StringSegment Normalize(StringSegment segment)
+    {
+        if (stripTrailing && segment.Length > format.Length)
+        {
+            // strip off trailing characters, e.g. "2023-01-01 12-00-00 (1).jpg" -> "2023-01-01 12-00-00"
+            return segment[..format.Length];
+        }
+        return segment;
     }
 }

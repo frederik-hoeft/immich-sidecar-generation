@@ -31,8 +31,9 @@ internal sealed partial class Commands
     /// <param name="tz">Timezone ID used to resolve local timestamps.</param>
     /// <param name="dryRun">Print what would be written without creating files.</param>
     /// <param name="overwrite">Overwrite existing .xmp sidecars.</param>
+    /// <param name="verbose">-v|Enable verbose output.</param>
     [Command("")]
-    public async Task<int> GenerateAsync([Argument] string root = ".", string tz = "Europe/Berlin", bool dryRun = false, bool overwrite = false, CancellationToken cancellationToken = default)
+    public async Task<int> GenerateAsync([Argument] string root = ".", string tz = "Europe/Berlin", bool dryRun = false, bool overwrite = false, bool verbose = false, CancellationToken cancellationToken = default)
     {
         if (!Directory.Exists(root))
         {
@@ -69,7 +70,10 @@ internal sealed partial class Commands
             if (!ParseTree.TryParse(new MetadataParserContext(fileInfo, timeZone), fragments))
             {
                 skipped++;
-                Console.WriteLine($"Cannot parse: {fileInfo.FullName}");
+                if (verbose)
+                {
+                    Console.WriteLine($"Cannot parse: {fileInfo.FullName}");
+                }
                 continue;
             }
 
@@ -91,13 +95,13 @@ internal sealed partial class Commands
                 wouldWrite++;
                 continue;
             }
-            XmpSidecar sidecar = new(requiredFragments: XmpTimestampFragment.Id);
-            foreach (IXmpFragment fragment in fragments)
-            {
-                sidecar.Add(fragment);
-            }
             try
             {
+                XmpSidecar sidecar = new(requiredFragments: XmpTimestampFragment.Id);
+                foreach (IXmpFragment fragment in fragments)
+                {
+                    sidecar.Add(fragment);
+                }
                 await sidecar.SaveAsync(sidecarPath, overwrite, cancellationToken: cancellationToken);
 
                 Console.WriteLine($"WRITE {sidecarPath} -> [{string.Join(", ", fragments)}]");
