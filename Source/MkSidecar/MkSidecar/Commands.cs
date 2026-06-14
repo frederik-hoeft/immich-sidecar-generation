@@ -4,8 +4,10 @@ using MkSidecar.Metadata.Combinators;
 using MkSidecar.Metadata.Parsers;
 using MkSidecar.Xmp;
 using MkSidecar.Xmp.Fragments;
+using Spectre.Console;
 using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 
 namespace MkSidecar;
 
@@ -23,7 +25,8 @@ internal sealed partial class Commands
     /// <param name="interactive">-i|Enable interactive timestamp parsing for filenames that don't match strict formats.</param>
     /// <param name="allowedPrefixes">Additional allowed prefixes that may appear before timestamps in filenames, e.g. "IMG_", "VID_".</param>
     [Command("")]
-    public async Task<int> GenerateAsync([Argument] string root = ".",
+    public async Task<int> GenerateAsync(
+        [Argument] string root = ".",
         string tz = "Europe/Berlin",
         bool dryRun = false,
         bool overwrite = false,
@@ -37,7 +40,10 @@ internal sealed partial class Commands
         {
             return status;
         }
-        ImmutableArray<string> prefixes = allowedPrefixes is [_, ..] ? [.. allowedPrefixes] : [];
+
+        ImmutableArray<string> prefixes = allowedPrefixes is [_, ..]
+            ? [.. allowedPrefixes]
+            : [];
 
         AndCombinator parseTree = new(
             new ExtensionParser(".jpg", ".jpeg", ".png", ".mp4"),
@@ -47,80 +53,200 @@ internal sealed partial class Commands
                 new TimestampFormatParser("yyyyMMdd_HHmmss", stripTrailing: true, prefixes),
                 new TimestampFormatParser("yyyyMMdd-HHmmss", stripTrailing: true, prefixes),
                 new TimestampFormatParser("yyyy-MM-dd", stripTrailing: false, allowedPrefixes: prefixes),
-                new InteractiveTimestampParser(enabled: interactive)
-                ));
+                new InteractiveTimestampParser(enabled: interactive)));
 
-        int scanned = 0;
-        int matched = 0;
-        int written = 0;
-        int wouldWrite = 0;
-        int skipped = 0;
-        int failed = 0;
-
+        RunStatistics statistics = new();
         List<IXmpFragment> fragments = [];
-        await foreach (FileInfo fileInfo in Directory.EnumerateFilesSafelyAsync(root, cancellationToken))
+
+        RenderHeader(root, timeZone, dryRun, overwrite, verbose, interactive, prefixes);
+
+        bool useLiveStatus = !verbose && !dryRun && !interactive;
+
+        if (useLiveStatus)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            scanned++;
-            fragments.Clear();
-            if (!parseTree.TryParse(new MetadataParserContext(fileInfo, timeZone), fragments))
-            {
-                skipped++;
-                if (verbose)
-                {
-                    Console.WriteLine($"Cannot parse: {fileInfo.FullName}");
-                }
-                continue;
-            }
-
-            matched++;
-
-            string sidecarPath = $"{fileInfo.FullName}.xmp";
-            FileInfo sidecarInfo = new(sidecarPath);
-
-            if (sidecarInfo.Exists && !overwrite)
-            {
-                Console.WriteLine($"SKIP existing sidecar: {sidecarInfo.FullName}");
-                skipped++;
-                continue;
-            }
-
-            if (dryRun)
-            {
-                Console.WriteLine($"WOULD WRITE {sidecarInfo.FullName} -> [{string.Join(", ", fragments)}]");
-                wouldWrite++;
-                continue;
-            }
-            try
-            {
-                XmpSidecar sidecar = new(requiredFragments: XmpTimestampFragment.Id);
-                foreach (IXmpFragment fragment in fragments)
-                {
-                    sidecar.Add(fragment);
-                }
-                await sidecar.SaveAsync(sidecarPath, overwrite, cancellationToken: cancellationToken);
-
-                Console.WriteLine($"WRITE {sidecarPath} -> [{string.Join(", ", fragments)}]");
-                written++;
-            }
-            catch (Exception ex)
-            {
-                failed++;
-                await Console.Error.WriteLineAsync($"FAIL {sidecarPath}: {ex.Message}");
-            }
+            await AnsiConsole
+                .Status()
+                .Spinner(Spinner.Known.Dots)
+                .SpinnerStyle(Style.Parse("green"))
+                .StartAsync("Scanning media files...", async context => await ProcessFilesAsync(context));
+        }
+        else
+        {
+            await ProcessFilesAsync(statusContext: null);
         }
 
-        Console.WriteLine();
-        Console.WriteLine($"Scanned:     {scanned}");
-        Console.WriteLine($"Matched:     {matched}");
-        Console.WriteLine($"Written:     {written}");
-        Console.WriteLine($"Would write: {wouldWrite}");
-        Console.WriteLine($"Skipped:     {skipped}");
-        Console.WriteLine($"Failed:      {failed}");
+        RenderSummary(statistics);
 
-        return failed == 0 ? 0 : 1;
+        return statistics.Failed == 0 ? 0 : 1;
+
+        async Task ProcessFilesAsync(StatusContext? statusContext)
+        {
+            await foreach (FileInfo fileInfo in Directory.EnumerateFilesSafelyAsync(root, cancellationToken))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (fileInfo.Extension.Equals(".xmp", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                statistics.Scanned++;
+                fragments.Clear();
+
+                statusContext?.Status(CreateStatusText(statistics, fileInfo));
+
+                bool parsed;
+                try
+                {
+                    parsed = parseTree.TryParse(new MetadataParserContext(fileInfo, timeZone), fragments);
+                }
+                catch (Exception ex)
+                {
+                    statistics.Failed++;
+                    await Console.Error.WriteLineAsync($"FAIL parse {fileInfo.FullName}: {ex.Message}");
+                    continue;
+                }
+
+                if (!parsed)
+                {
+                    statistics.Skipped++;
+
+                    if (verbose)
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]unknown:[/] {Markup.Escape(fileInfo.FullName)}");
+                    }
+
+                    continue;
+                }
+
+                statistics.Matched++;
+
+                string sidecarPath = $"{fileInfo.FullName}.xmp";
+                FileInfo sidecarInfo = new(sidecarPath);
+
+                if (sidecarInfo.Exists && !overwrite)
+                {
+                    statistics.UpToDate++;
+
+                    if (verbose)
+                    {
+                        AnsiConsole.MarkupLine($"[grey]up-to-date:[/] {Markup.Escape(sidecarInfo.FullName)}");
+                    }
+                    continue;
+                }
+
+                if (dryRun)
+                {
+                    statistics.WouldWrite++;
+                    AnsiConsole.MarkupLine($"[blue]write (dry run)[/] {Markup.Escape(sidecarInfo.FullName)} [grey]->[/] {Markup.Escape(FormatFragments(fragments))}");
+                    continue;
+                }
+
+                try
+                {
+                    XmpSidecar sidecar = new(requiredFragments: XmpTimestampFragment.Id);
+
+                    foreach (IXmpFragment fragment in fragments)
+                    {
+                        sidecar.Add(fragment);
+                    }
+
+                    await sidecar.SaveAsync(sidecarPath, overwrite, cancellationToken: cancellationToken);
+
+                    statistics.Written++;
+
+                    if (verbose)
+                    {
+                        AnsiConsole.MarkupLine($"[green]write[/] {Markup.Escape(sidecarPath)} [grey]->[/] {Markup.Escape(FormatFragments(fragments))}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    statistics.Failed++;
+                    await Console.Error.WriteLineAsync($"FAIL {sidecarPath}: {ex.Message}");
+                }
+            }
+        }
     }
+
+    private static void RenderHeader(
+        string root,
+        TimeZoneInfo timeZone,
+        bool dryRun,
+        bool overwrite,
+        bool verbose,
+        bool interactive,
+        ImmutableArray<string> prefixes)
+    {
+        Grid grid = new();
+        grid.AddColumn();
+        grid.AddColumn();
+
+        grid.AddRow("[grey]Root[/]", Markup.Escape(Path.GetFullPath(root)));
+        grid.AddRow("[grey]Timezone[/]", Markup.Escape(timeZone.Id));
+        grid.AddRow("[grey]Mode[/]", dryRun ? "[blue]dry-run[/]" : "[green]write[/]");
+        grid.AddRow("[grey]Overwrite[/]", overwrite ? "[yellow]yes[/]" : "no");
+        grid.AddRow("[grey]Verbose[/]", verbose ? "yes" : "no");
+        grid.AddRow("[grey]Interactive[/]", interactive ? "[yellow]yes[/]" : "no");
+
+        if (!prefixes.IsDefaultOrEmpty)
+        {
+            grid.AddRow(
+                "[grey]Allowed prefixes[/]",
+                Markup.Escape(string.Join(", ", prefixes)));
+        }
+
+        Panel panel = new Panel(grid)
+            .Header("mksidecar")
+            .RoundedBorder()
+            .BorderColor(Color.Grey);
+
+        AnsiConsole.Write(panel);
+        AnsiConsole.WriteLine();
+    }
+
+    private static string CreateStatusText(RunStatistics statistics, FileInfo currentFile)
+    {
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"Scanned [blue]{statistics.Scanned}[/] | Matched [green]{statistics.Matched}[/] | Written [green]{statistics.Written}[/] | Skipped [yellow]{statistics.Skipped}[/] | Failed [red]{statistics.Failed}[/] | [grey]{Markup.Escape(currentFile.Name)}[/]");
+    }
+
+    private static void RenderSummary(RunStatistics statistics)
+    {
+        AnsiConsole.WriteLine();
+
+        Table table = new Table()
+            .RoundedBorder()
+            .BorderColor(statistics.Failed == 0 ? Color.Green : Color.Red)
+            .Title("Summary");
+
+        table.AddColumn("Metric");
+        table.AddColumn("Count");
+
+        table.AddRow("Scanned", statistics.Scanned.ToString(CultureInfo.InvariantCulture));
+        table.AddRow("Matched", statistics.Matched.ToString(CultureInfo.InvariantCulture));
+        table.AddRow("Written", statistics.Written.ToString(CultureInfo.InvariantCulture));
+        table.AddRow("Would write", statistics.WouldWrite.ToString(CultureInfo.InvariantCulture));
+        table.AddRow("Skipped", statistics.Skipped.ToString(CultureInfo.InvariantCulture));
+        table.AddRow("Up-to-date", statistics.UpToDate.ToString(CultureInfo.InvariantCulture));
+        table.AddRow("Failed", statistics.Failed == 0
+            ? "[green]0[/]"
+            : $"[red]{statistics.Failed.ToString(CultureInfo.InvariantCulture)}[/]");
+
+        AnsiConsole.Write(table);
+
+        if (statistics.Failed == 0)
+        {
+            AnsiConsole.MarkupLine("[green]Done.[/]");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine("[red]Completed with failures.[/]");
+        }
+    }
+
+    private static string FormatFragments(IEnumerable<IXmpFragment> fragments) => "[" + string.Join(", ", fragments) + "]";
 
     private static (int status, TimeZoneInfo? timeZoneInfo) ValidateParameters(string root, string tz)
     {
@@ -129,6 +255,7 @@ internal sealed partial class Commands
             Console.Error.WriteLine($"Directory does not exist: {root}");
             return (status: 2, timeZoneInfo: null);
         }
+
         TimeZoneInfo timeZone;
         try
         {
@@ -142,4 +269,21 @@ internal sealed partial class Commands
 
         return (status: 0, timeZoneInfo: timeZone);
     }
+}
+
+internal sealed class RunStatistics
+{
+    public int Scanned { get; set; }
+
+    public int Matched { get; set; }
+
+    public int Written { get; set; }
+
+    public int WouldWrite { get; set; }
+
+    public int Skipped { get; set; }
+
+    public int UpToDate { get; set; }
+
+    public int Failed { get; set; }
 }
