@@ -9,6 +9,7 @@
     <PublishTrimmed>true</PublishTrimmed>
     <InvariantGlobalization>true</InvariantGlobalization>
     <OptimizationPreference>Speed</OptimizationPreference>
+    <AssemblyName>mksidecar</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>

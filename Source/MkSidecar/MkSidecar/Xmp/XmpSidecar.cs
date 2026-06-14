@@ -67,7 +67,7 @@ internal sealed class XmpSidecar(params ImmutableArray<string> requiredFragments
         tempPath ??= Path.Combine(directory, $".{Path.GetFileName(sidecarPath)}.{Guid.NewGuid():N}.tmp");
 
         {
-            await using FileStream tempFile = File.OpenWrite(tempPath);
+            await using FileStream tempFile = File.Create(tempPath);
             await CreateDocument().SaveAsync(tempFile, SaveOptions.None, cancellationToken);
         }
 
@@ -77,7 +77,14 @@ internal sealed class XmpSidecar(params ImmutableArray<string> requiredFragments
         }
         catch
         {
-            File.Delete(tempPath);
+            try
+            {
+                File.Delete(tempPath);
+            }
+            catch
+            {
+                // Best effort cleanup only.
+            }
             throw;
         }
     }

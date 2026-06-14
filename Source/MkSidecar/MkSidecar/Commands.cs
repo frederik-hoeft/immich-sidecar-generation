@@ -62,9 +62,11 @@ internal sealed partial class Commands
             cancellationToken.ThrowIfCancellationRequested();
 
             scanned++;
+            fragments.Clear();
             if (!s_parseTree.TryParse(new MetadataParserContext(fileInfo, timeZone), fragments))
             {
                 skipped++;
+                Console.WriteLine($"Cannot parse: {fileInfo.FullName}");
                 continue;
             }
 

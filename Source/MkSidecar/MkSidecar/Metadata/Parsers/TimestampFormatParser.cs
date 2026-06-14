@@ -13,7 +13,8 @@ internal sealed class TimestampFormatParser([StringSyntax(StringSyntaxAttribute.
         ReadOnlySpan<char> name = context.File.NameOnly;
         if (name.Length > format.Length)
         {
-            name = name[^format.Length..];
+            // strip off trailing characters, e.g. "2023-01-01 12-00-00 (1).jpg" -> "2023-01-01 12-00-00"
+            name = name[..format.Length];
         }
         if (DateTime.TryParseExact(name, format, provider: null, DateTimeStyles.None, out DateTime timestamp))
         {
