@@ -4,6 +4,7 @@ using MkSidecar.Metadata.Combinators;
 using MkSidecar.Metadata.Parsers;
 using MkSidecar.Xmp;
 using MkSidecar.Xmp.Fragments;
+using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
 
 namespace MkSidecar;
@@ -11,14 +12,16 @@ namespace MkSidecar;
 [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "Instance methods are required by ConsoleAppFramework.")]
 internal sealed partial class Commands
 {
-    private static readonly AndCombinator s_parseTree = new(
+    private static readonly ImmutableArray<string> s_allowedPrefixes = ["IMG_", "VID_"];
+
+    private static AndCombinator ParseTree => field ??= new(
         new ExtensionParser(".jpg", ".jpeg", ".png", ".mp4"),
         new OrCombinator(
-            new TimestampFormatParser("yyyy-MM-dd_HH-mm-ss"),
-            new TimestampFormatParser("yyyy-MM-dd HH-mm-ss"),
-            new TimestampFormatParser("yyyyMMdd_HHmmss"),
-            new TimestampFormatParser("yyyyMMdd-HHmmss"),
-            new TimestampFormatParser("yyyy-MM-dd")
+            new TimestampFormatParser("yyyy-MM-dd_HH-mm-ss", stripTrailing: true, s_allowedPrefixes),
+            new TimestampFormatParser("yyyy-MM-dd HH-mm-ss", stripTrailing: true, s_allowedPrefixes),
+            new TimestampFormatParser("yyyyMMdd_HHmmss", stripTrailing: true, s_allowedPrefixes),
+            new TimestampFormatParser("yyyyMMdd-HHmmss", stripTrailing: true, s_allowedPrefixes),
+            new TimestampFormatParser("yyyy-MM-dd", stripTrailing: false, allowedPrefixes: s_allowedPrefixes)
             ));
 
     /// <summary>
@@ -63,7 +66,7 @@ internal sealed partial class Commands
 
             scanned++;
             fragments.Clear();
-            if (!s_parseTree.TryParse(new MetadataParserContext(fileInfo, timeZone), fragments))
+            if (!ParseTree.TryParse(new MetadataParserContext(fileInfo, timeZone), fragments))
             {
                 skipped++;
                 Console.WriteLine($"Cannot parse: {fileInfo.FullName}");

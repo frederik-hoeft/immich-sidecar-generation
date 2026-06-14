@@ -1,6 +1,5 @@
 ﻿using MkSidecar.Extensions;
 using System.Collections.Immutable;
-using System.Text;
 using System.Xml.Linq;
 
 namespace MkSidecar.Xmp;
